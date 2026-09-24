@@ -1,0 +1,138 @@
+name: build
+
+# Rebuilds docker-library/python's Debian images with --disable-gil and publishes
+# them to GHCR as linux/amd64 + linux/arm64 manifests.
+on:
+  schedule:
+    # Daily: build only if upstream released a new patch version.
+    - cron: "0 5 * * *"
+    # Weekly: always rebuild to pick up Debian base-image security updates.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+env:
+  PY_MINOR: "3.14"
+  IMAGE: ghcr.io/${{ github.repository_owner }}/python
+  WEEKLY_CRON: "0 6 * * 1"
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.check.outputs.sha }}
+      version: ${{ steps.check.outputs.version }}
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: docker-library/python
+          sparse-checkout: ${{ env.PY_MINOR }}
+      - id: check
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          sha="$(git rev-parse HEAD)"
+          version="$(awk '$1 == "ENV" && $2 == "PYTHON_VERSION" { print $3 }' "$PY_MINOR/trixie/Dockerfile")"
+          test -n "$version"
+          if [ "$GITHUB_EVENT_NAME" != schedule ] || [ "$SCHEDULE" = "$WEEKLY_CRON" ]; then
+            build=true
+          elif docker manifest inspect "$IMAGE:${version}t-trixie" > /dev/null; then
+            build=false
+          else
+            echo "::notice::$IMAGE:${version}t-trixie not found; building"
+            build=true
+          fi
+          echo "upstream=$sha version=$version build=$build"
+          {
+            echo "sha=$sha"
+            echo "version=$version"
+            echo "build=$build"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [trixie, slim-trixie]
+        arch: [amd64, arm64]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 150
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      VARIANT: ${{ matrix.variant }}
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: docker-library/python
+          ref: ${{ needs.check.outputs.sha }}
+          sparse-checkout: ${{ env.PY_MINOR }}
+      - name: Enable free threading
+        run: |
+          {
+            echo "TAG=$IMAGE:${VERSION}t-$VARIANT-$ARCH"
+            echo "CONTEXT=$PY_MINOR/$VARIANT"
+          } >> "$GITHUB_ENV"
+          CONTEXT="$PY_MINOR/$VARIANT"
+          sed -i 's/--enable-option-checking=fatal/--disable-gil --enable-option-checking=fatal/' "$CONTEXT/Dockerfile"
+          test "$(grep -c -- '--disable-gil' "$CONTEXT/Dockerfile")" -eq 1
+      - name: Build
+        run: |
+          docker build --pull \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=${{ needs.check.outputs.sha }}" \
+            -t "$TAG" "$CONTEXT"
+      - name: Smoke test
+        run: |
+          docker run --rm "$TAG" python -c '
+          import sys, sysconfig
+          assert sysconfig.get_config_var("Py_GIL_DISABLED") == 1, "not a free-threaded build"
+          assert not sys._is_gil_enabled(), "GIL is enabled at runtime"
+          print(sys.version)
+          '
+          docker run --rm "$TAG" pip --version
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push
+        run: docker push "$TAG"
+
+  publish:
+    needs: [check, build]
+    strategy:
+      matrix:
+        variant: [trixie, slim-trixie]
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      VARIANT: ${{ matrix.variant }}
+    steps:
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create multi-arch tags
+        run: |
+          tags=(-t "$IMAGE:${VERSION}t-$VARIANT" -t "$IMAGE:${PY_MINOR}t-$VARIANT")
+          if [ "$VARIANT" = trixie ]; then
+            tags+=(-t "$IMAGE:${PY_MINOR}t")
+          fi
+          docker buildx imagetools create "${tags[@]}" \
+            "$IMAGE:${VERSION}t-$VARIANT-amd64" \
+            "$IMAGE:${VERSION}t-$VARIANT-arm64"
+          docker buildx imagetools inspect "$IMAGE:${VERSION}t-$VARIANT"
