@@ -27,7 +27,7 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       sha: ${{ steps.check.outputs.sha }}
       version: ${{ steps.check.outputs.version }}
@@ -67,7 +67,7 @@ jobs:
       matrix:
         variant: [trixie, slim-trixie]
         arch: [amd64, arm64]
-    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
     timeout-minutes: 150
     env:
       VERSION: ${{ needs.check.outputs.version }}
@@ -88,6 +88,13 @@ jobs:
           CONTEXT="$PY_MINOR/$VARIANT"
           sed -i 's/--enable-option-checking=fatal/--disable-gil --enable-option-checking=fatal/' "$CONTEXT/Dockerfile"
           test "$(grep -c -- '--disable-gil' "$CONTEXT/Dockerfile")" -eq 1
+      - name: Upgrade Debian packages
+        # Apply pending Debian security/bug-fix updates on top of the base image
+        # before Python is built, then drop the apt caches from the layer.
+        run: |
+          test "$(grep -c '^FROM ' "$CONTEXT/Dockerfile")" -eq 1
+          sed -i '/^FROM /a RUN set -eux; export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get upgrade -y; apt-get dist-clean' "$CONTEXT/Dockerfile"
+          test "$(grep -c 'apt-get upgrade -y' "$CONTEXT/Dockerfile")" -eq 1
       - name: Build
         run: |
           docker build --pull \
@@ -116,7 +123,7 @@ jobs:
     strategy:
       matrix:
         variant: [trixie, slim-trixie]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     env:
       VERSION: ${{ needs.check.outputs.version }}
       VARIANT: ${{ matrix.variant }}
