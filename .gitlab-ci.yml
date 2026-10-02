@@ -1,0 +1,85 @@
+# Builds the Ubuntu + GCC free-threaded image (Dockerfile) on the homelab runners and
+# publishes it to the in-cluster registry. linux/amd64 only: that is what the runners are.
+default:
+  tags:
+    - docker
+
+stages:
+  - build
+  - test
+
+variables:
+  IMAGE_NAME: "192.168.1.202:5000/python-freethreaded"
+
+build-image:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    entrypoint: [""]
+  # PGO + LTO on a 4-vCPU node, plus kaniko snapshotting, outruns the 1h default.
+  timeout: 3h
+  script:
+    # Versions come from the Dockerfile's ARG defaults so the tag cannot drift from the build.
+    - python_version="$(awk -F= '$1 == "ARG PYTHON_VERSION" && $2 != "" { print $2; exit }' Dockerfile)"
+    - gcc_version="$(awk -F= '$1 == "ARG GCC_IMAGE" && $2 != "" { sub(/^.*:/, "", $2); print $2; exit }' Dockerfile)"
+    - ubuntu_version="$(awk -F= '$1 == "ARG UBUNTU_IMAGE" && $2 != "" { sub(/^.*:/, "", $2); print $2; exit }' Dockerfile)"
+    - test -n "$python_version" && test -n "$gcc_version" && test -n "$ubuntu_version"
+    - image_tag="${python_version}t-ubuntu${ubuntu_version}-gcc${gcc_version}"
+    - echo "building $IMAGE_NAME:$image_tag and $IMAGE_NAME:$CI_COMMIT_SHORT_SHA"
+    - mkdir -p /kaniko/.docker
+    - printf '{"auths":{"192.168.1.202:5000":{}}}\n' > /kaniko/.docker/config.json
+    # --compressed-caching=false: the copied GCC toolchain layer is large and kaniko's
+    # in-memory compression is a known OOM source under pod memory limits.
+    # Retries: the cluster has documented intermittent egress packet loss.
+    - >
+      /kaniko/executor
+      --context "$CI_PROJECT_DIR"
+      --dockerfile "$CI_PROJECT_DIR/Dockerfile"
+      --build-arg "VCS_REF=$CI_COMMIT_SHA"
+      --build-arg "BUILD_DATE=$CI_PIPELINE_CREATED_AT"
+      --destination "$IMAGE_NAME:$image_tag"
+      --destination "$IMAGE_NAME:$CI_COMMIT_SHORT_SHA"
+      --digest-file "$CI_PROJECT_DIR/image-digest.txt"
+      --insecure
+      --skip-tls-verify
+      --cache=true
+      --snapshot-mode=redo
+      --compressed-caching=false
+      --image-download-retry=3
+      --push-retry=3
+    - |
+      {
+        echo "IMAGE_TAG=$image_tag"
+        echo "GCC_VERSION=$gcc_version"
+        echo "UBUNTU_VERSION=$ubuntu_version"
+        echo "IMAGE_DIGEST=$(cat "$CI_PROJECT_DIR/image-digest.txt")"
+      } > build.env
+    - cat build.env
+  artifacts:
+    reports:
+      dotenv: build.env
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+test-image:
+  stage: test
+  needs:
+    - build-image
+  image:
+    name: "$IMAGE_NAME:$CI_COMMIT_SHORT_SHA"
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - python3 /usr/local/share/python-build/smoke_test.py --compiler "GCC $GCC_VERSION" --os-version "$UBUNTU_VERSION"
+    - |
+      {
+        echo "image:          $IMAGE_NAME:$IMAGE_TAG"
+        echo "image digest:   $IMAGE_DIGEST"
+        cat /usr/local/share/python-build/build-info.txt
+      } > build-info.txt
+    - cat build-info.txt
+  artifacts:
+    paths:
+      - build-info.txt
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
