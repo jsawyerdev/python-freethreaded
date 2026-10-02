@@ -60,6 +60,11 @@ build-image:
       dotenv: build.env
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes:
+        - Dockerfile
+        - smoke_test.py
+        - .gitlab-ci.yml
+    - if: '$CI_PIPELINE_SOURCE == "web"'
 
 test-image:
   stage: test
@@ -83,3 +88,8 @@ test-image:
       - build-info.txt
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes:
+        - Dockerfile
+        - smoke_test.py
+        - .gitlab-ci.yml
+    - if: '$CI_PIPELINE_SOURCE == "web"'

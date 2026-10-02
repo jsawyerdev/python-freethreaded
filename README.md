@@ -1,13 +1,27 @@
 # python-freethreaded
 
-Free-threaded (`--disable-gil`) CPython container images, built two ways:
+Free-threaded (`--disable-gil`) CPython container images, published to
+`ghcr.io/jsawyerdev/python` for `linux/amd64` and `linux/arm64`, in two flavours:
 
-- **Debian (GitHub Actions, GHCR):** the official
-  [docker-library/python](https://github.com/docker-library/python) Debian images, for
-  `linux/amd64` and `linux/arm64`.
-- **Ubuntu + latest GCC (homelab GitLab, local registry):** CPython compiled with the
-  official `gcc` image's toolchain and run on Ubuntu, `linux/amd64` only. See
-  [Ubuntu + GCC image](#ubuntu--gcc-image).
+- **Debian:** the official [docker-library/python](https://github.com/docker-library/python)
+  Debian images with `--disable-gil`.
+- **Ubuntu + GCC:** CPython compiled with the newest GCC release (from the official `gcc`
+  image) and run on Ubuntu. See [Ubuntu + GCC image](#ubuntu--gcc-image).
+
+```sh
+docker run --rm -it ghcr.io/jsawyerdev/python:3.14t
+docker run --rm -it ghcr.io/jsawyerdev/python:3.14t-ubuntu26.04
+```
+
+## When to use it
+
+Free-threading lets several threads run Python code at the same time. It helps CPU-bound
+work spread across threads, and costs elsewhere: single-threaded code runs slower and
+memory use is higher. Small I/O-bound web services usually get slower, not faster.
+
+Any compiled extension that does not declare free-threading support turns the GIL back on
+for the whole process when it is imported; Python prints a `RuntimeWarning` saying so.
+Check that your dependencies ship `cp314t` wheels.
 
 ## Debian images
 
@@ -25,11 +39,6 @@ with the GIL off.
 
 `*-amd64` / `*-arm64` tags are per-architecture intermediates; use the tags above.
 
-```sh
-docker pull ghcr.io/OWNER/python:3.14t
-docker run --rm -it ghcr.io/OWNER/python:3.14t
-```
-
 ### Schedule
 
 `.github/workflows/build.yml`:
@@ -42,8 +51,7 @@ To move to a new minor version, change `PY_MINOR` in the workflow.
 
 ## Ubuntu + GCC image
 
-`Dockerfile`, built by `.gitlab-ci.yml` on the homelab GitLab runners (Kaniko) and pushed
-to `192.168.1.202:5000/python-freethreaded`.
+Built from `Dockerfile` by `.github/workflows/build-ubuntu.yml`.
 
 - **Compiler:** GCC from the official `gcc` image (`GCC_IMAGE`), copied into an Ubuntu
   build stage. CPython is compiled on Ubuntu, not inside the `gcc` image, because that
@@ -55,6 +63,8 @@ to `192.168.1.202:5000/python-freethreaded`.
 - **Build:** the same `./configure` flags as docker-library/python plus `--disable-gil`
   (PGO, LTO, shared libpython), with Ubuntu's `dpkg-buildflags` hardening flags. Ubuntu's
   default `-flto=auto` is removed so CPython's own `--with-lto` controls LTO.
+- **Users:** `ubuntu:26.04` ships a user `ubuntu` with uid/gid 1000. Dockerfiles that run
+  `useradd --uid 1000` must remove it first (`userdel --remove ubuntu`).
 
 The build fails unless `smoke_test.py` passes inside the image: the interpreter was
 compiled by the expected GCC, the GIL is disabled, the OS is the expected Ubuntu release,
@@ -65,27 +75,32 @@ runs.
 
 Each image records its build in `/usr/local/share/python-build/build-info.txt`: CPython
 version and source checksum, compiler and linker versions, base images, configure flags,
-`CFLAGS`/`LDFLAGS`, and the Ubuntu runtime packages. The `test-image` CI job prints it
-with the image digest and keeps it as the `build-info.txt` artifact.
+`CFLAGS`/`LDFLAGS`, and the Ubuntu runtime packages. The workflow also writes it to each
+run's job summary.
 
 ```sh
-docker run --rm 192.168.1.202:5000/python-freethreaded:3.14.8t-ubuntu26.04-gcc16.2.0 \
+docker run --rm ghcr.io/jsawyerdev/python:3.14t-ubuntu26.04 \
   cat /usr/local/share/python-build/build-info.txt
 ```
-
-The registry is plain HTTP: add `192.168.1.202:5000` to Docker's `insecure-registries`
-before pulling.
 
 ### Tags
 
 | Tag | Meaning |
 | --- | --- |
-| `<python>t-ubuntu<release>-gcc<gcc>`, e.g. `3.14.8t-ubuntu26.04-gcc16.2.0` | the versions it was built from |
-| `<short commit sha>` | the commit that built it |
+| `3.14.8t-ubuntu26.04-gcc16.2.0` | the exact CPython, Ubuntu and GCC versions it was built from |
+| `3.14t-ubuntu26.04` | the latest build for that minor version and Ubuntu release |
 
-### Updating
+`*-amd64` / `*-arm64` tags are per-architecture intermediates.
 
-Versions are the `ARG` defaults at the top of `Dockerfile`; the CI tag is derived from
-them. To move to a newer GCC, Ubuntu or CPython, change `GCC_IMAGE`, `UBUNTU_IMAGE`, or
+### Schedule and updating
+
+Rebuilt weekly (Monday) for Ubuntu security updates, manually, and when `Dockerfile`,
+`smoke_test.py` or the workflow changes on `main`.
+
+Versions are the `ARG` defaults at the top of `Dockerfile`; tags are derived from them. To
+move to a newer GCC, Ubuntu or CPython, change `GCC_IMAGE`, `UBUNTU_IMAGE`, or
 `PYTHON_VERSION` together with `PYTHON_SHA256` (from python.org or docker-library's
-Dockerfile), and push to the default branch.
+Dockerfile).
+
+`.gitlab-ci.yml` builds the same `Dockerfile` (amd64 only) with Kaniko for a private
+registry; it is not needed to use the published images.

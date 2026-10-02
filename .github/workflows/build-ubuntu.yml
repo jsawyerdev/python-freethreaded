@@ -1,0 +1,102 @@
+name: build-ubuntu
+
+# Builds Dockerfile (free-threaded CPython compiled with the official gcc image's
+# toolchain, on Ubuntu) and publishes it to GHCR as linux/amd64 + linux/arm64 manifests.
+on:
+  schedule:
+    # Weekly: rebuild to pick up Ubuntu security updates.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - smoke_test.py
+      - .github/workflows/build-ubuntu.yml
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-ubuntu
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/python
+
+jobs:
+  meta:
+    runs-on: ubuntu-26.04
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      minor_tag: ${{ steps.meta.outputs.minor_tag }}
+    steps:
+      - uses: actions/checkout@v7
+      # Versions come from the Dockerfile's ARG defaults so tags cannot drift from the build.
+      - id: meta
+        run: |
+          arg() { awk -F= -v name="ARG $1" '$1 == name && $2 != "" { print $2; exit }' Dockerfile; }
+          python_version="$(arg PYTHON_VERSION)"
+          gcc_version="$(arg GCC_IMAGE | sed 's/^.*://')"
+          ubuntu_version="$(arg UBUNTU_IMAGE | sed 's/^.*://')"
+          test -n "$python_version" && test -n "$gcc_version" && test -n "$ubuntu_version"
+          {
+            echo "tag=${python_version}t-ubuntu${ubuntu_version}-gcc${gcc_version}"
+            echo "minor_tag=${python_version%.*}t-ubuntu${ubuntu_version}"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    needs: meta
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
+    timeout-minutes: 150
+    env:
+      TAG: ${{ needs.meta.outputs.tag }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v7
+      # smoke_test.py runs inside the build as its last step, so a broken image fails here.
+      - name: Build
+        run: |
+          docker build --pull \
+            --build-arg "VCS_REF=$GITHUB_SHA" \
+            --build-arg "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            -t "$IMAGE:$TAG" .
+      - name: Record build details
+        run: |
+          {
+            echo "### $IMAGE:$TAG"
+            echo '```'
+            docker run --rm "$IMAGE:$TAG" cat /usr/local/share/python-build/build-info.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push
+        run: docker push "$IMAGE:$TAG"
+
+  publish:
+    needs: [meta, build]
+    runs-on: ubuntu-26.04
+    env:
+      TAG: ${{ needs.meta.outputs.tag }}
+      MINOR_TAG: ${{ needs.meta.outputs.minor_tag }}
+    steps:
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create multi-arch tags
+        run: |
+          docker buildx imagetools create -t "$IMAGE:$TAG" -t "$IMAGE:$MINOR_TAG" \
+            "$IMAGE:$TAG-amd64" \
+            "$IMAGE:$TAG-arm64"
+          docker buildx imagetools inspect "$IMAGE:$TAG"
