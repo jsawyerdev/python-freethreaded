@@ -23,6 +23,22 @@ Any compiled extension that does not declare free-threading support turns the GI
 for the whole process when it is imported; Python prints a `RuntimeWarning` saying so.
 Check that your dependencies ship `cp314t` wheels.
 
+## Benchmark
+
+`bench/run.sh` runs `bench/bench.py` (standard library only) in three CPython 3.14.8
+images: the official GIL build, the Debian free-threaded build (GCC 14) and the Ubuntu
+free-threaded build (GCC 16). It does three rounds, rotating the order, and prints medians
+relative to the GIL build: six single-thread micro-benchmarks, thread scaling at 1, 2, 4
+and 8 threads for a fixed amount of CPU-bound work, and peak RSS of fresh interpreters for
+a few allocation patterns.
+
+```sh
+bench/run.sh
+```
+
+Micro-benchmarks exaggerate the single-thread cost of free-threading compared with real
+applications; run the same comparison on your own workload before deciding.
+
 ## Debian images
 
 The changes from upstream are `--disable-gil` in the `./configure` call and an
