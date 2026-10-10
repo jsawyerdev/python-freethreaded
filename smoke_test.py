@@ -71,6 +71,32 @@ def check_extension_modules() -> None:
     logger.info("extension modules: %d imported", len(names))
 
 
+def check_accelerators() -> None:
+    """Import C accelerators whose absence would silently fall back to pure Python.
+
+    configure skips a module whose library is missing, and the stdlib then imports the
+    slow pure-Python version without error. Since 3.15, _decimal needs libmpdec-dev.
+    """
+    names = [
+        "_bisect",
+        "_datetime",
+        "_decimal",
+        "_elementtree",
+        "_heapq",
+        "_json",
+        "_pickle",
+    ]
+    missing: list[str] = []
+    for name in names:
+        try:
+            importlib.import_module(name)
+        except ImportError as exc:
+            missing.append(f"{name}: {exc}")
+    if missing:
+        raise SystemExit("C accelerator modules missing:\n" + "\n".join(missing))
+    logger.info("accelerators: %s", ", ".join(names))
+
+
 def check_tls_trust_store() -> None:
     ca_count = ssl.create_default_context().cert_store_stats()["x509_ca"]
     if ca_count == 0:
@@ -104,6 +130,7 @@ def main() -> None:
     check_free_threading()
     check_os(args.os_version)
     check_extension_modules()
+    check_accelerators()
     check_tls_trust_store()
     check_pip()
     logger.info("smoke test passed")
