@@ -10,7 +10,7 @@ Free-threaded (`--disable-gil`) CPython container images, published to
 
 ```sh
 docker run --rm -it ghcr.io/jsawyerdev/python:3.14t
-docker run --rm -it ghcr.io/jsawyerdev/python:3.14t-ubuntu26.04
+docker run --rm -it ghcr.io/jsawyerdev/python:3.15t-ubuntu26.04
 ```
 
 ## When to use it
@@ -21,7 +21,8 @@ memory use is higher. Small I/O-bound web services usually get slower, not faste
 
 Any compiled extension that does not declare free-threading support turns the GIL back on
 for the whole process when it is imported; Python prints a `RuntimeWarning` saying so.
-Check that your dependencies ship `cp314t` wheels.
+Check that your dependencies ship free-threaded wheels for your Python version (`cp314t`,
+`cp315t`, or `abi3t` on 3.15+).
 
 ## Benchmark
 
@@ -63,7 +64,9 @@ with the GIL off.
 - weekly (Monday): rebuilds unconditionally to pick up Debian security updates;
 - manually via "Run workflow", and on every push to `main`.
 
-To move to a new minor version, change `PY_MINOR` in the workflow.
+To move to a new minor version, change `PY_MINOR` in the workflow once docker-library has a
+folder for it (release candidates live in `3.N-rc`). Debian images are currently built for
+3.14 only.
 
 ## Ubuntu + GCC image
 
@@ -75,7 +78,7 @@ Built from `Dockerfile` by `.github/workflows/build-ubuntu.yml`.
   Ubuntu libraries the interpreter runs against.
 - **Runtime:** `UBUNTU_IMAGE` with `apt-get upgrade` applied, plus only the shared
   libraries the interpreter links against (found with `ldd` at build time). No compiler
-  is installed, so packages without a prebuilt `cp314t` wheel will not install.
+  is installed, so packages without a prebuilt free-threaded wheel will not install.
 - **Build:** the same `./configure` flags as docker-library/python plus `--disable-gil`
   (PGO, LTO, shared libpython), with Ubuntu's `dpkg-buildflags` hardening flags. Ubuntu's
   default `-flto=auto` is removed so CPython's own `--with-lto` controls LTO.
@@ -95,7 +98,7 @@ version and source checksum, compiler and linker versions, base images, configur
 run's job summary.
 
 ```sh
-docker run --rm ghcr.io/jsawyerdev/python:3.14t-ubuntu26.04 \
+docker run --rm ghcr.io/jsawyerdev/python:3.15t-ubuntu26.04 \
   cat /usr/local/share/python-build/build-info.txt
 ```
 
@@ -103,8 +106,8 @@ docker run --rm ghcr.io/jsawyerdev/python:3.14t-ubuntu26.04 \
 
 | Tag | Meaning |
 | --- | --- |
-| `3.14.8t-ubuntu26.04-gcc16.2.0` | the exact CPython, Ubuntu and GCC versions it was built from |
-| `3.14t-ubuntu26.04` | the latest build for that minor version and Ubuntu release |
+| `3.15.0t-ubuntu26.04-gcc16.2.0`, `3.14.8t-ubuntu26.04-gcc16.2.0` | the exact CPython, Ubuntu and GCC versions it was built from |
+| `3.15t-ubuntu26.04`, `3.14t-ubuntu26.04` | the latest build for that minor version and Ubuntu release |
 
 `*-amd64` / `*-arm64` tags are per-architecture intermediates.
 
@@ -113,10 +116,14 @@ docker run --rm ghcr.io/jsawyerdev/python:3.14t-ubuntu26.04 \
 Rebuilt weekly (Monday) for Ubuntu security updates, manually, and when `Dockerfile`,
 `smoke_test.py` or the workflow changes on `main`.
 
-Versions are the `ARG` defaults at the top of `Dockerfile`; tags are derived from them. To
-move to a newer GCC, Ubuntu or CPython, change `GCC_IMAGE`, `UBUNTU_IMAGE`, or
-`PYTHON_VERSION` together with `PYTHON_SHA256` (from python.org or docker-library's
-Dockerfile).
+The newest CPython, GCC and Ubuntu versions are the `ARG` defaults at the top of
+`Dockerfile`; tags are derived from them. To move to a newer GCC, Ubuntu or CPython, change
+`GCC_IMAGE`, `UBUNTU_IMAGE`, or `PYTHON_VERSION` together with `PYTHON_SHA256` (from
+python.org or docker-library's Dockerfile).
+
+Older minor versions still published are listed with their checksums in `OLDER_PYTHONS` in
+the workflow and are built with the same toolchain; bump their patch versions there, and
+remove a line to stop publishing that minor version. Each minor version may appear once.
 
 `.gitlab-ci.yml` builds the same `Dockerfile` (amd64 only) with Kaniko for a private
 registry; it is not needed to use the published images.

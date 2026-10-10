@@ -29,21 +29,34 @@ jobs:
   meta:
     runs-on: ubuntu-26.04
     outputs:
-      tag: ${{ steps.meta.outputs.tag }}
-      minor_tag: ${{ steps.meta.outputs.minor_tag }}
+      os_tag: ${{ steps.meta.outputs.os_tag }}
+      ubuntu_version: ${{ steps.meta.outputs.ubuntu_version }}
+      pythons: ${{ steps.meta.outputs.pythons }}
     steps:
       - uses: actions/checkout@v7
-      # Versions come from the Dockerfile's ARG defaults so tags cannot drift from the build.
+      # The newest Python and the toolchain come from the Dockerfile's ARG defaults so tags
+      # cannot drift from the build. OLDER_PYTHONS lists previous minors still published;
+      # bump their patch versions by hand.
       - id: meta
+        env:
+          OLDER_PYTHONS: |
+            3.14.8 c2215904f02b175596dc49351585104f4bc20341e1c47378b26a2c274360ce73
         run: |
           arg() { awk -F= -v name="ARG $1" '$1 == name && $2 != "" { print $2; exit }' Dockerfile; }
           python_version="$(arg PYTHON_VERSION)"
+          python_sha256="$(arg PYTHON_SHA256)"
           gcc_version="$(arg GCC_IMAGE | sed 's/^.*://')"
           ubuntu_version="$(arg UBUNTU_IMAGE | sed 's/^.*://')"
-          test -n "$python_version" && test -n "$gcc_version" && test -n "$ubuntu_version"
+          test -n "$python_version" && test -n "$python_sha256"
+          test -n "$gcc_version" && test -n "$ubuntu_version"
+          pythons="$(printf '%s %s\n%s' "$python_version" "$python_sha256" "$OLDER_PYTHONS" \
+            | jq -cRn '[inputs | select(length > 0) | split(" ") | {version: .[0], sha256: .[1], minor: (.[0] | split(".")[:2] | join("."))}]')"
+          test "$(jq 'map(.minor) | unique | length' <<< "$pythons")" \
+            -eq "$(jq length <<< "$pythons")"
           {
-            echo "tag=${python_version}t-ubuntu${ubuntu_version}-gcc${gcc_version}"
-            echo "minor_tag=${python_version%.*}t-ubuntu${ubuntu_version}"
+            echo "os_tag=ubuntu${ubuntu_version}-gcc${gcc_version}"
+            echo "ubuntu_version=${ubuntu_version}"
+            echo "pythons=${pythons}"
           } | tee -a "$GITHUB_OUTPUT"
 
   build:
@@ -51,17 +64,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        python: ${{ fromJSON(needs.meta.outputs.pythons) }}
         arch: [amd64, arm64]
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
     timeout-minutes: 150
     env:
-      TAG: ${{ needs.meta.outputs.tag }}-${{ matrix.arch }}
+      TAG: ${{ matrix.python.version }}t-${{ needs.meta.outputs.os_tag }}-${{ matrix.arch }}
+      PYTHON_VERSION: ${{ matrix.python.version }}
+      PYTHON_SHA256: ${{ matrix.python.sha256 }}
     steps:
       - uses: actions/checkout@v7
       # smoke_test.py runs inside the build as its last step, so a broken image fails here.
       - name: Build
         run: |
           docker build --pull \
+            --build-arg "PYTHON_VERSION=$PYTHON_VERSION" \
+            --build-arg "PYTHON_SHA256=$PYTHON_SHA256" \
             --build-arg "VCS_REF=$GITHUB_SHA" \
             --build-arg "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
@@ -84,10 +102,13 @@ jobs:
 
   publish:
     needs: [meta, build]
+    strategy:
+      matrix:
+        python: ${{ fromJSON(needs.meta.outputs.pythons) }}
     runs-on: ubuntu-26.04
     env:
-      TAG: ${{ needs.meta.outputs.tag }}
-      MINOR_TAG: ${{ needs.meta.outputs.minor_tag }}
+      TAG: ${{ matrix.python.version }}t-${{ needs.meta.outputs.os_tag }}
+      MINOR_TAG: ${{ matrix.python.minor }}t-ubuntu${{ needs.meta.outputs.ubuntu_version }}
     steps:
       - uses: docker/login-action@v4
         with:
