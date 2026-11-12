@@ -40,7 +40,7 @@ jobs:
       - id: meta
         env:
           OLDER_PYTHONS: |
-            3.14.9 e02d9ac21cebda6e46435369744a92c65cc7cd8669697694122cf97ffacd1e53
+            3.14.10 de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032
         run: |
           arg() { awk -F= -v name="ARG $1" '$1 == name && $2 != "" { print $2; exit }' Dockerfile; }
           python_version="$(arg PYTHON_VERSION)"

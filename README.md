@@ -106,7 +106,7 @@ docker run --rm ghcr.io/jsawyerdev/python:3.15t-ubuntu26.04 \
 
 | Tag | Meaning |
 | --- | --- |
-| `3.15.1t-ubuntu26.04-gcc16.2.0`, `3.14.9t-ubuntu26.04-gcc16.2.0` | the exact CPython, Ubuntu and GCC versions it was built from |
+| `3.15.2t-ubuntu26.04-gcc16.2.0`, `3.14.10t-ubuntu26.04-gcc16.2.0` | the exact CPython, Ubuntu and GCC versions it was built from |
 | `3.15t-ubuntu26.04`, `3.14t-ubuntu26.04` | the latest build for that minor version and Ubuntu release |
 
 `*-amd64` / `*-arm64` tags are per-architecture intermediates.
