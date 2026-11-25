@@ -5,8 +5,9 @@ Free-threaded (`--disable-gil`) CPython container images, published to
 
 - **Debian:** the official [docker-library/python](https://github.com/docker-library/python)
   Debian images with `--disable-gil`.
-- **Ubuntu + GCC:** CPython compiled with the newest GCC release (from the official `gcc`
-  image) and run on Ubuntu. See [Ubuntu + GCC image](#ubuntu--gcc-image).
+- **Ubuntu + GCC:** the newest CPython 3.15 and 3.14 patch releases compiled with the
+  newest GCC release (from the official `gcc` image) and run on Ubuntu. See
+  [Ubuntu + GCC image](#ubuntu--gcc-image).
 
 ```sh
 docker run --rm -it ghcr.io/jsawyerdev/python:3.14t
@@ -107,23 +108,52 @@ docker run --rm ghcr.io/jsawyerdev/python:3.15t-ubuntu26.04 \
 | Tag | Meaning |
 | --- | --- |
 | `3.15.2t-ubuntu26.04-gcc16.2.0`, `3.14.10t-ubuntu26.04-gcc16.2.0` | the exact CPython, Ubuntu and GCC versions it was built from |
-| `3.15t-ubuntu26.04`, `3.14t-ubuntu26.04` | the latest build for that minor version and Ubuntu release |
+| `3.15t-ubuntu26.04`, `3.14t-ubuntu26.04` | the newest CPython patch of that minor, built with the newest GCC; moves on every release |
 
 `*-amd64` / `*-arm64` tags are per-architecture intermediates.
 
-### Schedule and updating
+### Versions
 
-Rebuilt weekly (Monday) for Ubuntu security updates, manually, and when `Dockerfile`,
-`smoke_test.py` or the workflow changes on `main`.
+Nothing is pinned by hand except Ubuntu. Every CI run starts with `resolve_versions.py`,
+which picks:
 
-The newest CPython, GCC and Ubuntu versions are the `ARG` defaults at the top of
-`Dockerfile`; tags are derived from them. To move to a newer GCC, Ubuntu or CPython, change
-`GCC_IMAGE`, `UBUNTU_IMAGE`, or `PYTHON_VERSION` together with `PYTHON_SHA256` (from
-python.org or docker-library's Dockerfile).
+- **GCC:** the highest `X.Y.Z` tag of the official `gcc` image, from the
+  [official-images manifest](https://github.com/docker-library/official-images/blob/master/library/gcc);
+- **CPython:** the newest stable patch release of each minor in `PYTHON_MINORS`
+  (currently 3.15 and 3.14), with its source tarball's SHA256 from python.org's release API.
+  The Dockerfile verifies the download against that checksum.
 
-Older minor versions still published are listed with their checksums in `OLDER_PYTHONS` in
-the workflow and are built with the same toolchain; bump their patch versions there, and
-remove a line to stop publishing that minor version. Each minor version may appear once.
+```sh
+python3 resolve_versions.py               # JSON, used by GitHub Actions
+python3 resolve_versions.py --format env  # KEY=value, used by GitLab CI
+```
 
-`.gitlab-ci.yml` builds the same `Dockerfile` (amd64 only) with Kaniko for a private
-registry; it is not needed to use the published images.
+To publish a new minor version or stop publishing one, edit `PYTHON_MINORS` in
+`resolve_versions.py` and the matching `PY_MINOR` matrix in `.gitlab-ci.yml`. To move to a
+newer Ubuntu release, change `UBUNTU_IMAGE` in `Dockerfile`.
+
+`Dockerfile` has no default for `GCC_IMAGE`, `PYTHON_VERSION` or `PYTHON_SHA256`; pass them
+when building by hand:
+
+```sh
+eval "$(python3 resolve_versions.py --format env)"
+docker build --build-arg GCC_IMAGE="gcc:$GCC_VERSION" \
+  --build-arg PYTHON_VERSION="$PYTHON_3_15_VERSION" \
+  --build-arg PYTHON_SHA256="$PYTHON_3_15_SHA256" .
+```
+
+### Schedule
+
+`.github/workflows/build-ubuntu.yml`:
+
+- daily: builds each minor whose exact tag (CPython patch + GCC version) is not yet
+  published, so a new GCC or CPython release ships within a day;
+- weekly (Monday): rebuilds everything to pick up Ubuntu security updates;
+- manually via "Run workflow", and when `Dockerfile`, `smoke_test.py`,
+  `resolve_versions.py` or the workflow changes on `main`.
+
+`.gitlab-ci.yml` builds the same `Dockerfile` (amd64 only, both minors) with Kaniko for a
+private registry; it is not needed to use the published images. It resolves versions the
+same way and runs on a GitLab pipeline schedule, manually, or when those files change. Each
+scheduled run rebuilds both minors. It pushes the exact tag, the `3.Nt-ubuntu26.04` minor
+tag, `latest` (newest minor) and a `<commit>-py3.N` tag used by its test job.
