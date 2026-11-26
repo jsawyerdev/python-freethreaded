@@ -2,9 +2,13 @@ name: build-ubuntu
 
 # Builds Dockerfile (free-threaded CPython compiled with the official gcc image's
 # toolchain, on Ubuntu) and publishes it to GHCR as linux/amd64 + linux/arm64 manifests.
+# GCC and CPython versions are the newest upstream releases, resolved on every run by
+# resolve_versions.py.
 on:
   schedule:
-    # Weekly: rebuild to pick up Ubuntu security updates.
+    # Daily: build only versions whose exact tag is not yet published (new GCC or CPython).
+    - cron: "0 6 * * *"
+    # Weekly: always rebuild to pick up Ubuntu security updates.
     - cron: "0 7 * * 1"
   workflow_dispatch:
   push:
@@ -12,6 +16,7 @@ on:
     paths:
       - Dockerfile
       - smoke_test.py
+      - resolve_versions.py
       - .github/workflows/build-ubuntu.yml
 
 permissions:
@@ -24,43 +29,60 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/python
+  WEEKLY_CRON: "0 7 * * 1"
 
 jobs:
   meta:
     runs-on: ubuntu-26.04
     outputs:
+      gcc_version: ${{ steps.meta.outputs.gcc_version }}
       os_tag: ${{ steps.meta.outputs.os_tag }}
       ubuntu_version: ${{ steps.meta.outputs.ubuntu_version }}
       pythons: ${{ steps.meta.outputs.pythons }}
     steps:
       - uses: actions/checkout@v7
-      # The newest Python and the toolchain come from the Dockerfile's ARG defaults so tags
-      # cannot drift from the build. OLDER_PYTHONS lists previous minors still published;
-      # bump their patch versions by hand.
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Ubuntu stays pinned in the Dockerfile; GCC and CPython come from upstream.
       - id: meta
         env:
-          OLDER_PYTHONS: |
-            3.14.10 de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032
+          SCHEDULE: ${{ github.event.schedule }}
         run: |
-          arg() { awk -F= -v name="ARG $1" '$1 == name && $2 != "" { print $2; exit }' Dockerfile; }
-          python_version="$(arg PYTHON_VERSION)"
-          python_sha256="$(arg PYTHON_SHA256)"
-          gcc_version="$(arg GCC_IMAGE | sed 's/^.*://')"
-          ubuntu_version="$(arg UBUNTU_IMAGE | sed 's/^.*://')"
-          test -n "$python_version" && test -n "$python_sha256"
+          resolved="$(python3 -I resolve_versions.py)"
+          gcc_version="$(jq -r .gcc <<< "$resolved")"
+          ubuntu_version="$(awk -F= '$1 == "ARG UBUNTU_IMAGE" && $2 != "" { sub(/^.*:/, "", $2); print $2; exit }' Dockerfile)"
           test -n "$gcc_version" && test -n "$ubuntu_version"
-          pythons="$(printf '%s %s\n%s' "$python_version" "$python_sha256" "$OLDER_PYTHONS" \
-            | jq -cRn '[inputs | select(length > 0) | split(" ") | {version: .[0], sha256: .[1], minor: (.[0] | split(".")[:2] | join("."))}]')"
-          test "$(jq 'map(.minor) | unique | length' <<< "$pythons")" \
-            -eq "$(jq length <<< "$pythons")"
+          os_tag="ubuntu${ubuntu_version}-gcc${gcc_version}"
+          if [ "$GITHUB_EVENT_NAME" != schedule ] || [ "$SCHEDULE" = "$WEEKLY_CRON" ]; then
+            force=true
+          else
+            force=false
+          fi
+          # A failed inspect (missing tag or registry error) counts as unpublished, so an
+          # outage costs an extra build rather than a skipped one.
+          pythons='[]'
+          while read -r python; do
+            tag="$IMAGE:$(jq -r .version <<< "$python")t-$os_tag"
+            if [ "$force" = true ] || ! docker manifest inspect "$tag" > /dev/null 2>&1; then
+              echo "building $tag"
+              pythons="$(jq -c --argjson python "$python" '. + [$python]' <<< "$pythons")"
+            else
+              echo "$tag already published; skipping"
+            fi
+          done < <(jq -c '.pythons[]' <<< "$resolved")
           {
-            echo "os_tag=ubuntu${ubuntu_version}-gcc${gcc_version}"
+            echo "gcc_version=${gcc_version}"
+            echo "os_tag=${os_tag}"
             echo "ubuntu_version=${ubuntu_version}"
             echo "pythons=${pythons}"
           } | tee -a "$GITHUB_OUTPUT"
 
   build:
     needs: meta
+    if: needs.meta.outputs.pythons != '[]'
     strategy:
       fail-fast: false
       matrix:
@@ -72,12 +94,14 @@ jobs:
       TAG: ${{ matrix.python.version }}t-${{ needs.meta.outputs.os_tag }}-${{ matrix.arch }}
       PYTHON_VERSION: ${{ matrix.python.version }}
       PYTHON_SHA256: ${{ matrix.python.sha256 }}
+      GCC_IMAGE: gcc:${{ needs.meta.outputs.gcc_version }}
     steps:
       - uses: actions/checkout@v7
       # smoke_test.py runs inside the build as its last step, so a broken image fails here.
       - name: Build
         run: |
           docker build --pull \
+            --build-arg "GCC_IMAGE=$GCC_IMAGE" \
             --build-arg "PYTHON_VERSION=$PYTHON_VERSION" \
             --build-arg "PYTHON_SHA256=$PYTHON_SHA256" \
             --build-arg "VCS_REF=$GITHUB_SHA" \

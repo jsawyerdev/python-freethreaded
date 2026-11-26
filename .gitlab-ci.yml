@@ -1,31 +1,72 @@
 # Builds the Ubuntu + GCC free-threaded image (Dockerfile) on the homelab runners and
 # publishes it to the in-cluster registry. linux/amd64 only: that is what the runners are.
+# GCC and CPython are the newest upstream releases, resolved per pipeline by
+# resolve_versions.py; run it from a pipeline schedule (CI/CD > Schedules) to pick them up.
 default:
   tags:
     - docker
 
 stages:
+  - resolve
   - build
   - test
 
 variables:
   IMAGE_NAME: "192.168.1.202:5000/python-freethreaded"
 
+# Must match PYTHON_MINORS in resolve_versions.py.
+.python-minors:
+  parallel:
+    matrix:
+      - PY_MINOR: ["3.15", "3.14"]
+
+.rules:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes:
+        - Dockerfile
+        - smoke_test.py
+        - resolve_versions.py
+        - .gitlab-ci.yml
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+resolve-versions:
+  stage: resolve
+  extends: .rules
+  image: python:3.14-slim
+  script:
+    - python3 -I resolve_versions.py --format env > versions.env
+    - cat versions.env
+  artifacts:
+    reports:
+      dotenv: versions.env
+
 build-image:
   stage: build
+  extends: [.rules, .python-minors]
+  needs:
+    - resolve-versions
   image:
     name: gcr.io/kaniko-project/executor:v1.23.2-debug
     entrypoint: [""]
   # PGO + LTO on a 4-vCPU node, plus kaniko snapshotting, outruns the 1h default.
   timeout: 3h
   script:
-    # Versions come from the Dockerfile's ARG defaults so the tag cannot drift from the build.
-    - python_version="$(awk -F= '$1 == "ARG PYTHON_VERSION" && $2 != "" { print $2; exit }' Dockerfile)"
-    - gcc_version="$(awk -F= '$1 == "ARG GCC_IMAGE" && $2 != "" { sub(/^.*:/, "", $2); print $2; exit }' Dockerfile)"
+    # GCC and CPython come from resolve-versions; Ubuntu stays pinned in the Dockerfile.
+    - key="$(echo "$PY_MINOR" | tr . _)"
+    - eval "python_version=\"\${PYTHON_${key}_VERSION}\" python_sha256=\"\${PYTHON_${key}_SHA256}\""
+    - gcc_version="$GCC_VERSION"
     - ubuntu_version="$(awk -F= '$1 == "ARG UBUNTU_IMAGE" && $2 != "" { sub(/^.*:/, "", $2); print $2; exit }' Dockerfile)"
-    - test -n "$python_version" && test -n "$gcc_version" && test -n "$ubuntu_version"
+    - test -n "$python_version" && test -n "$python_sha256"
+    - test -n "$gcc_version" && test -n "$ubuntu_version"
     - image_tag="${python_version}t-ubuntu${ubuntu_version}-gcc${gcc_version}"
-    - echo "building $IMAGE_NAME:$image_tag and $IMAGE_NAME:$CI_COMMIT_SHORT_SHA"
+    - minor_tag="${PY_MINOR}t-ubuntu${ubuntu_version}"
+    - commit_tag="$CI_COMMIT_SHORT_SHA-py$PY_MINOR"
+    # Tags never contain whitespace, so $destinations is safely word-split unquoted below.
+    - destinations="--destination $IMAGE_NAME:$image_tag --destination $IMAGE_NAME:$minor_tag --destination $IMAGE_NAME:$commit_tag"
+    - if [ "$PY_MINOR" = "$PYTHON_LATEST_MINOR" ]; then destinations="$destinations --destination $IMAGE_NAME:latest"; fi
+    - echo "building $destinations"
     - mkdir -p /kaniko/.docker
     - printf '{"auths":{"192.168.1.202:5000":{}}}\n' > /kaniko/.docker/config.json
     # --compressed-caching=false: the copied GCC toolchain layer is large and kaniko's
@@ -35,10 +76,12 @@ build-image:
       /kaniko/executor
       --context "$CI_PROJECT_DIR"
       --dockerfile "$CI_PROJECT_DIR/Dockerfile"
+      --build-arg "GCC_IMAGE=gcc:$gcc_version"
+      --build-arg "PYTHON_VERSION=$python_version"
+      --build-arg "PYTHON_SHA256=$python_sha256"
       --build-arg "VCS_REF=$CI_COMMIT_SHA"
       --build-arg "BUILD_DATE=$CI_PIPELINE_CREATED_AT"
-      --destination "$IMAGE_NAME:$image_tag"
-      --destination "$IMAGE_NAME:$CI_COMMIT_SHORT_SHA"
+      $destinations
       --digest-file "$CI_PROJECT_DIR/image-digest.txt"
       --insecure
       --skip-tls-verify
@@ -47,49 +90,40 @@ build-image:
       --compressed-caching=false
       --image-download-retry=3
       --push-retry=3
+    # Suffixed by minor: test-image needs every build-image job, so dotenv keys must not collide.
     - |
       {
-        echo "IMAGE_TAG=$image_tag"
-        echo "GCC_VERSION=$gcc_version"
+        echo "IMAGE_TAG_${key}=$image_tag"
         echo "UBUNTU_VERSION=$ubuntu_version"
-        echo "IMAGE_DIGEST=$(cat "$CI_PROJECT_DIR/image-digest.txt")"
+        echo "IMAGE_DIGEST_${key}=$(cat "$CI_PROJECT_DIR/image-digest.txt")"
       } > build.env
     - cat build.env
   artifacts:
     reports:
       dotenv: build.env
-  rules:
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes:
-        - Dockerfile
-        - smoke_test.py
-        - .gitlab-ci.yml
-    - if: '$CI_PIPELINE_SOURCE == "web"'
 
 test-image:
   stage: test
+  extends: [.rules, .python-minors]
   needs:
+    - resolve-versions
     - build-image
   image:
-    name: "$IMAGE_NAME:$CI_COMMIT_SHORT_SHA"
+    name: "$IMAGE_NAME:$CI_COMMIT_SHORT_SHA-py$PY_MINOR"
   variables:
     GIT_STRATEGY: none
   script:
+    - key="$(echo "$PY_MINOR" | tr . _)"
+    - eval "image_tag=\"\${IMAGE_TAG_${key}}\" image_digest=\"\${IMAGE_DIGEST_${key}}\""
+    - test -n "$image_tag" && test -n "$image_digest"
     - python3 /usr/local/share/python-build/smoke_test.py --compiler "GCC $GCC_VERSION" --os-version "$UBUNTU_VERSION"
     - |
       {
-        echo "image:          $IMAGE_NAME:$IMAGE_TAG"
-        echo "image digest:   $IMAGE_DIGEST"
+        echo "image:          $IMAGE_NAME:$image_tag"
+        echo "image digest:   $image_digest"
         cat /usr/local/share/python-build/build-info.txt
       } > build-info.txt
     - cat build-info.txt
   artifacts:
     paths:
       - build-info.txt
-  rules:
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes:
-        - Dockerfile
-        - smoke_test.py
-        - .gitlab-ci.yml
-    - if: '$CI_PIPELINE_SOURCE == "web"'

@@ -1,3 +1,4 @@
+# check=skip=InvalidDefaultArgInFrom
 # Free-threaded CPython compiled with the official gcc image's toolchain and run on Ubuntu.
 #
 # The compiler is copied out of GCC_IMAGE into an Ubuntu build stage rather than compiling
@@ -5,11 +6,15 @@
 # Debian's OpenSSL/SQLite/readline headers and then run against Ubuntu's libraries.
 # Building on UBUNTU_IMAGE keeps headers and runtime libraries from the same release.
 # Kaniko builds this file in CI, so it avoids BuildKit-only syntax (heredocs, cache mounts).
+#
+# GCC_IMAGE, PYTHON_VERSION and PYTHON_SHA256 have no defaults: CI passes the newest
+# releases from resolve_versions.py, so a stale pin here cannot silently win. The check
+# directive on line 1 silences BuildKit's lint for that deliberately default-less FROM.
 
-ARG GCC_IMAGE=gcc:16.2.0
+ARG GCC_IMAGE
 ARG UBUNTU_IMAGE=ubuntu:26.04
-ARG PYTHON_VERSION=3.15.2
-ARG PYTHON_SHA256=8b5536d280142ecf6cdfe15d12a21ba1c65e300bbf7b28a8d0cdb849575797de
+ARG PYTHON_VERSION
+ARG PYTHON_SHA256
 
 FROM ${GCC_IMAGE} AS gcc
 
@@ -26,6 +31,7 @@ ARG PYTHON_SHA256
 COPY --from=gcc /usr/local/ /usr/local/
 
 RUN set -eux; \
+	test -n "$PYTHON_VERSION" && test -n "$PYTHON_SHA256"; \
 	export DEBIAN_FRONTEND=noninteractive; \
 	apt-get update; \
 	apt-get upgrade -y; \
